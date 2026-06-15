@@ -13,6 +13,9 @@ Tools:
 """
 
 import os
+import random
+import re
+from typing import Any
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -32,6 +35,183 @@ def _get_groq_client():
             "GROQ_API_KEY not set. Add it to a .env file in the project root."
         )
     return Groq(api_key=api_key)
+
+def _normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def _tokenize(value: str) -> list[str]:
+    return [token for token in re.findall(r"[a-z0-9]+", _normalize_text(value)) if token]
+
+
+def _listing_search_text(listing: dict) -> str:
+    parts = [
+        listing.get("title", ""),
+        listing.get("description", ""),
+        listing.get("category", ""),
+        " ".join(listing.get("style_tags", []) or []),
+        " ".join(listing.get("colors", []) or []),
+        listing.get("brand", "") or "",
+        listing.get("platform", ""),
+        listing.get("condition", ""),
+    ]
+    return _normalize_text(" ".join(parts))
+
+
+def _size_matches(requested_size: str | None, listing_size: Any) -> bool:
+    if not requested_size:
+        return True
+
+    requested = _normalize_text(requested_size)
+    candidate = _normalize_text(listing_size)
+    if not candidate:
+        return False
+
+    requested_tokens = re.findall(r"[a-z0-9]+", requested)
+    candidate_tokens = re.findall(r"[a-z0-9]+", candidate)
+    if requested in candidate:
+        return True
+    return any(token and token in candidate_tokens for token in requested_tokens)
+
+
+def _score_listing(listing: dict, description: str) -> int:
+    query_tokens = [
+        token
+        for token in _tokenize(description)
+        if token
+        not in {
+            "the",
+            "a",
+            "an",
+            "for",
+            "and",
+            "or",
+            "with",
+            "under",
+            "size",
+            "in",
+            "on",
+            "of",
+            "to",
+            "my",
+            "i",
+            "im",
+            "looking",
+            "want",
+            "get",
+            "need",
+        }
+    ]
+    if not query_tokens:
+        query_tokens = _tokenize(description)
+
+    title_text = _normalize_text(listing.get("title", ""))
+    description_text = _normalize_text(listing.get("description", ""))
+    category_text = _normalize_text(listing.get("category", ""))
+    style_text = _normalize_text(" ".join(listing.get("style_tags", []) or []))
+    color_text = _normalize_text(" ".join(listing.get("colors", []) or []))
+    brand_text = _normalize_text(listing.get("brand", "") or "")
+    search_text = _listing_search_text(listing)
+
+    score = 0
+    if description.strip() and description.strip().lower() in search_text:
+        score += 3
+
+    for token in query_tokens:
+        if token in title_text:
+            score += 4
+        if token in style_text:
+            score += 3
+        if token in description_text:
+            score += 2
+        if token in category_text:
+            score += 2
+        if token in color_text:
+            score += 1
+        if token in brand_text:
+            score += 1
+
+    return score
+
+
+def _extract_wardrobe_items(wardrobe: dict) -> list[dict]:
+    if not isinstance(wardrobe, dict):
+        return []
+    items = wardrobe.get("items", [])
+    return items if isinstance(items, list) else []
+
+
+def _summarize_item(item: dict) -> str:
+    if not isinstance(item, dict):
+        return "unknown item"
+
+    pieces = [
+        item.get("name"),
+        item.get("category"),
+        ", ".join(item.get("colors", []) or []),
+        ", ".join(item.get("style_tags", []) or []),
+    ]
+    notes = item.get("notes")
+    if notes:
+        pieces.append(str(notes))
+    summary = " | ".join(part for part in pieces if part)
+    return summary or "unknown item"
+
+
+def _fallback_style_advice(new_item: dict, empty_wardrobe: bool = False) -> str:
+    title = new_item.get("title", "this piece")
+    category = _normalize_text(new_item.get("category", ""))
+    style_tags = ", ".join(new_item.get("style_tags", []) or [])
+    colors = ", ".join(new_item.get("colors", []) or [])
+
+    base = f"Try styling {title} with a clean base layer, simple shoes, and one accent piece that repeats a color from the item."
+    if empty_wardrobe:
+        return (
+            f"Your wardrobe is empty right now, so start with a versatile foundation: a neutral bottom, clean sneakers or boots, and one layer that echoes the vibe of {title}."
+        )
+
+    if "outerwear" in category:
+        return (
+            f"Pair {title} over a fitted top and your favorite jeans or trousers so it stays the statement piece. Keep accessories minimal and let the {style_tags or 'overall vibe'} do the work."
+        )
+    if "shoes" in category:
+        return (
+            f"Build the outfit around {title} by repeating its color palette with your top or bag. Keep the rest of the look simple so the shoes read intentional, not crowded."
+        )
+    if "bottoms" in category:
+        return (
+            f"Style {title} with a tucked-in tee or fitted top, then add shoes that echo its vibe. Use {colors or 'the color palette'} to choose one matching layer or accessory."
+        )
+    if "accessories" in category:
+        return (
+            f"Use {title} as the finishing touch on a simple outfit. It will work best with clean lines, one strong base color, and a small detail that repeats its tone or texture."
+        )
+
+    return base
+
+
+def _call_groq_text(messages: list[dict], temperature: float = 0.8, max_tokens: int = 220) -> str:
+    client = _get_groq_client()
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return (response.choices[0].message.content or "").strip()
+
+
+def _pick_caption_option(text: str) -> str:
+    options = []
+    for line in re.split(r"[\n\r]+|\s*\|\|\s*", text):
+        cleaned = re.sub(r"^[-*\d\.\)\s]+", "", line).strip()
+        if cleaned:
+            options.append(cleaned)
+    if not options:
+        return text.strip()
+    return random.choice(options)
 
 
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
@@ -69,8 +249,33 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    try:
+        listings = load_listings()
+    except Exception:
+        return []
+
+    matches: list[tuple[int, dict]] = []
+    for listing in listings:
+        price = listing.get("price")
+        if max_price is not None and price is not None and float(price) > float(max_price):
+            continue
+        if not _size_matches(size, listing.get("size")):
+            continue
+
+        score = _score_listing(listing, description)
+        if score <= 0:
+            continue
+
+        matches.append((score, listing))
+
+    matches.sort(
+        key=lambda pair: (
+            -pair[0],
+            float(pair[1].get("price", 0) or 0),
+            _normalize_text(pair[1].get("title", "")),
+        )
+    )
+    return [dict(listing) for score, listing in matches]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +305,41 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    wardrobe_items = _extract_wardrobe_items(wardrobe)
+    item_summary = _summarize_item(new_item)
+
+    if not wardrobe_items:
+        prompt = (
+            "You are FitFindr, a styling assistant for secondhand fashion. "
+            "The user has an empty wardrobe, so give general styling advice for the new item. "
+            "Return 2 concise sentences. Be specific about layers, silhouettes, shoes, accessories, or color pairing. "
+            f"New item: {item_summary}"
+        )
+    else:
+        wardrobe_lines = "\n".join(f"- {_summarize_item(item)}" for item in wardrobe_items)
+        prompt = (
+            "You are FitFindr, a styling assistant for secondhand fashion. "
+            "Suggest 1-2 complete outfits using the new thrifted item and pieces from the user's wardrobe. "
+            "Return a single short paragraph with practical styling advice. Mention specific wardrobe items when they fit. "
+            f"New item: {item_summary}\n"
+            f"Wardrobe items:\n{wardrobe_lines}"
+        )
+
+    try:
+        response = _call_groq_text(
+            [
+                {"role": "system", "content": "You write concise, wearable outfit advice."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.85,
+            max_tokens=180,
+        )
+        if response:
+            return response
+    except Exception:
+        pass
+
+    return _fallback_style_advice(new_item, empty_wardrobe=not wardrobe_items)
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +371,33 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return "I need an outfit suggestion before I can create a fit card."
+
+    prompt = (
+        "You are FitFindr, and you write short, shareable outfit captions. "
+        "Write 3 different caption options, each 1-2 sentences, casual and Instagram-ready. "
+        "Each caption should mention the thrifted item, the price, and the platform naturally once. "
+        "Avoid sounding like a product listing. Separate the three options with blank lines. "
+        f"Item details: title={new_item.get('title', 'unknown')}; price={new_item.get('price', 'unknown')}; platform={new_item.get('platform', 'unknown')}; colors={', '.join(new_item.get('colors', []) or [])}; style_tags={', '.join(new_item.get('style_tags', []) or [])}. "
+        f"Outfit suggestion: {outfit}"
+    )
+
+    try:
+        response = _call_groq_text(
+            [
+                {"role": "system", "content": "You write concise social captions for fashion posts."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=1.1,
+            max_tokens=220,
+        )
+        if response:
+            return _pick_caption_option(response)
+    except Exception:
+        pass
+
+    title = new_item.get("title", "this find")
+    platform = new_item.get("platform", "the app")
+    price = new_item.get("price", "?")
+    return f"found {title} on {platform} for ${price} and built the whole look around it"

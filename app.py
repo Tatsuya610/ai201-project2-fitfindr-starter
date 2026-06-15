@@ -18,6 +18,21 @@ from agent import run_agent
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
 
+def _format_listing(listing: dict) -> str:
+    if not listing:
+        return ""
+
+    title = listing.get("title", "Unknown listing")
+    price = listing.get("price")
+    platform = listing.get("platform", "unknown platform")
+    condition = listing.get("condition", "unknown condition")
+    size = listing.get("size")
+    parts = [title, f"${price}" if price is not None else "$?", f"on {platform}", condition]
+    if size:
+        parts.append(f"size {size}")
+    return " — ".join(parts)
+
+
 # ── query handler ─────────────────────────────────────────────────────────────
 
 def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
@@ -43,8 +58,23 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
            string and return it along with session["outfit_suggestion"] and
            session["fit_card"].
     """
-    # TODO: implement this function
-    return "Agent not yet implemented.", "", ""
+    if not user_query or not user_query.strip():
+        return "Please enter a search query before submitting.", "", ""
+
+    if wardrobe_choice == "Empty wardrobe (new user)":
+        wardrobe = get_empty_wardrobe()
+    else:
+        wardrobe = get_example_wardrobe()
+
+    session = run_agent(user_query.strip(), wardrobe)
+    if session["error"]:
+        return session["error"], "", ""
+
+    return (
+        _format_listing(session.get("selected_item")),
+        session.get("outfit_suggestion", "") or "",
+        session.get("fit_card", "") or "",
+    )
 
 
 # ── interface ─────────────────────────────────────────────────────────────────

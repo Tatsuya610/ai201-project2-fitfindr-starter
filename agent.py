@@ -18,6 +18,7 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
 from tools import search_listings, suggest_outfit, create_fit_card
 
 
@@ -92,10 +93,89 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+    session["parsed"] = _parse_query(query)
+
+    search_results = search_listings(
+        session["parsed"]["description"],
+        size=session["parsed"]["size"],
+        max_price=session["parsed"]["max_price"],
+    )
+    session["search_results"] = search_results
+
+    if not search_results:
+        session["error"] = (
+            "I couldn't find any listings matching that description, size, and price. "
+            "Try raising your max price, removing the size filter, or using a broader description."
+        )
+        return session
+
+    session["selected_item"] = search_results[0]
+
+    outfit_suggestion = suggest_outfit(session["selected_item"], session["wardrobe"])
+    session["outfit_suggestion"] = outfit_suggestion
+    if not outfit_suggestion or not outfit_suggestion.strip():
+        session["error"] = "I couldn't generate an outfit suggestion from that item. Try a different listing or wardrobe setup."
+        return session
+
+    session["fit_card"] = create_fit_card(session["outfit_suggestion"], session["selected_item"])
     return session
+
+def _parse_query(query: str) -> dict:
+    """Extract search constraints from a free-form user query."""
+    cleaned_query = query.strip()
+    lower_query = cleaned_query.lower()
+
+    size = None
+    size_match = re.search(r"\bsize\s+([a-z0-9]+(?:\s*[/-]\s*[a-z0-9]+)?)", lower_query)
+    if size_match:
+        size = size_match.group(1).strip().upper()
+
+    max_price = None
+    price_match = re.search(
+        r"(?:under|below|less than|no more than|max(?:imum)?|budget(?: of)?)\s*\$?\s*(\d+(?:\.\d+)?)",
+        lower_query,
+    )
+    if price_match:
+        max_price = float(price_match.group(1))
+    else:
+        dollar_match = re.search(r"\$\s*(\d+(?:\.\d+)?)", lower_query)
+        if dollar_match:
+            max_price = float(dollar_match.group(1))
+
+    description = cleaned_query
+    if size_match:
+        description = re.sub(size_match.group(0), "", description, flags=re.IGNORECASE)
+    if price_match:
+        description = re.sub(price_match.group(0), "", description, flags=re.IGNORECASE)
+    elif max_price is not None:
+        description = re.sub(r"\$\s*\d+(?:\.\d+)?", "", description, flags=re.IGNORECASE)
+
+    description = re.sub(r"[,.;:]+", " ", description)
+    description = re.sub(r"\b(?:under|below|less than|no more than|max(?:imum)?|budget(?: of)?)\b", " ", description, flags=re.IGNORECASE)
+    description = re.sub(r"\b(?:size)\b", " ", description, flags=re.IGNORECASE)
+    description = re.sub(r"\s+", " ", description).strip()
+
+    return {
+        "description": description or cleaned_query,
+        "size": size,
+        "max_price": max_price,
+    }
+
+
+def _format_listing(listing: dict) -> str:
+    if not listing:
+        return ""
+
+    title = listing.get("title", "Unknown listing")
+    price = listing.get("price")
+    platform = listing.get("platform", "unknown platform")
+    condition = listing.get("condition", "unknown condition")
+    size = listing.get("size")
+    parts = [f"{title}", f"${price}" if price is not None else "$?", f"on {platform}", condition]
+    if size:
+        parts.append(f"size {size}")
+    return " — ".join(parts)
 
 
 # ── CLI test ──────────────────────────────────────────────────────────────────
